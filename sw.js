@@ -1,5 +1,5 @@
-const CACHE = 'heart-weather-v0.1.2';
-const ASSETS = ['./','./index.html','./styles.css','./app.js','./manifest.webmanifest','./icons/icon-192.png','./icons/icon-512.png','./icons/apple-touch-icon.png'];
+const CACHE = 'heart-weather-v0.1.2-icon-v2';
+const ASSETS = ['./','./index.html','./styles.css','./app.js','./manifest.webmanifest','./icons/icon-192-mood-v2.png','./icons/icon-512-mood-v2.png','./icons/apple-touch-icon-mood-v2.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
   self.skipWaiting();
