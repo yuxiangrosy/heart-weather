@@ -1,0 +1,16 @@
+{
+  "name": "心情天气 · 我的小岛",
+  "short_name": "心情天气",
+  "description": "用天气记下心情，让小岛随生活慢慢生长。",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#fff4ea",
+  "theme_color": "#fff4ea",
+  "lang": "zh-CN",
+  "icons": [
+    {"src":"./icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
+    {"src":"./icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+  ]
+}
