@@ -1,4 +1,4 @@
-/* 心情天气 v0.1.2 — dependency-free PWA. Private notes stay in IndexedDB. */
+/* 心情天气 v0.2.0 — backward-compatible IndexedDB, backup safety, animated island. */
 'use strict';
 // Permanent IDs are stable across app updates. DO NOT rename legacy IDs: old diaries depend on them.
 const MOODS = [
@@ -43,7 +43,7 @@ const MOOD_MAP=Object.fromEntries(MOODS.map(x=>[x.id,x]));
 const ZONE=Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai';
 const pad=n=>String(n).padStart(2,'0');
 const root=document.getElementById('app');
-const state={tab:'island',entries:[],growth:[],settings:{},mood:null,note:'',tags:[],showAllMoods:false,editShowAllMoods:false,monthOffset:0,selectedDay:today(),period:'week',periodOffset:0,editing:null,editMood:null,editTags:[],editNote:'',editTime:'',importData:null,protectDownloaded:false,protectConfirmed:false,toastTimer:null,notice:'',offline:false};
+const state={tab:'island',entries:[],growth:[],settings:{},mood:null,note:'',tags:[],showAllMoods:false,editShowAllMoods:false,monthOffset:0,selectedDay:today(),period:'week',periodOffset:0,editing:null,editMood:null,editTags:[],editNote:'',editTime:'',importData:null,protectDownloaded:false,protectConfirmed:false,toastTimer:null,notice:'',offline:false,activeMemory:null,sceneAnimation:null,islandPage:0};
 let db;
 const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $=s=>document.querySelector(s);
@@ -62,8 +62,33 @@ function txSave(table,data){return new Promise((resolve,reject)=>{const t=db.tra
 function txDelete(table,key){return new Promise((resolve,reject)=>{const t=db.transaction(table,'readwrite');t.objectStore(table).delete(key);t.oncomplete=resolve;t.onerror=()=>reject(t.error);});}
 function setToast(message){const el=document.createElement('div');el.className='toast';el.setAttribute('role','status');el.textContent=message;document.querySelectorAll('.toast').forEach(x=>x.remove());document.body.appendChild(el);clearTimeout(state.toastTimer);state.toastTimer=setTimeout(()=>el.remove(),2800);}
 function orderEntries(){state.entries.sort((a,b)=>b.occurredAt.localeCompare(a.occurredAt)||b.id.localeCompare(a.id));}
-async function reload(){state.entries=await getAll('moods');orderEntries();state.growth=await getAll('growth');state.growth.sort((a,b)=>a.position-b.position);const record=await getOne('meta','settings');state.settings=record?.value||{lastBackupConfirmedAt:null,lastBackupEntryCount:0,lastBackupExportedAt:null};}
+async function reload(){
+  state.entries=await getAll('moods');orderEntries();
+  state.growth=await getAll('growth');state.growth.sort((a,b)=>a.position-b.position);
+  const record=await getOne('meta','settings');
+  // Legacy settings stay readable. No destructive schema upgrade or new object stores.
+  state.settings={lastBackupConfirmedAt:null,lastBackupEntryCount:0,lastBackupExportedAt:null,lastBackupRevision:null,lastBackupExportedRevision:null,dataRevision:0,...(record?.value||{})};
+}
+
 async function saveSettings(){await txSave('meta',{key:'settings',value:state.settings});}
+// An edit/delete must invalidate the backup even when the number of entries stays the same.
+// Store the data revision in the same IndexedDB transaction as the actual diary mutation.
+function commitMoodMutation(kind,value){
+  const revision=(Number.isSafeInteger(state.settings.dataRevision)?state.settings.dataRevision:0)+1;
+  const settings={...state.settings,dataRevision:revision};
+  return new Promise((resolve,reject)=>{
+    const t=db.transaction(['moods','meta'],'readwrite');
+    if(kind==='put')t.objectStore('moods').put(value);
+    else if(kind==='delete')t.objectStore('moods').delete(value);
+    else {reject(new Error('未知数据变更'));t.abort();return;}
+    t.objectStore('meta').put({key:'settings',value:settings});
+    t.oncomplete=()=>{state.settings=settings;resolve();};
+    t.onerror=()=>reject(t.error);
+    t.onabort=()=>reject(t.error||new Error('写入中断'));
+  });
+}
+function unbackedChanges(){return Math.max(0,(state.settings.dataRevision||0)-(Number.isInteger(state.settings.lastBackupRevision)?state.settings.lastBackupRevision:0));}
+
 async function saveDraft(){await txSave('drafts',{key:'record',mood:state.mood,tags:state.tags,note:state.note,updatedAt:new Date().toISOString()});}
 let draftDebounce;
 function queueDraft(){clearTimeout(draftDebounce);draftDebounce=setTimeout(()=>saveDraft().catch(()=>setToast('草稿暂时无法保存')),400);}
@@ -85,23 +110,46 @@ async function saveMood(){
   const isNewDay=!state.entries.some(e=>e.localDate===day);
   const entry={id:uid(),moodType:state.mood,tags:state.tags.slice(),note:state.note.trim(),occurredAt:now.toISOString(),localDate:day,timezone:ZONE,createdAt:now.toISOString(),updatedAt:now.toISOString()};
   // First commit the irreplaceable note. UI failures must never invite a duplicate retry.
-  try{await txSave('moods',entry);}catch(err){if(button)button.disabled=false;setToast('保存失败，文字还在。请再试一次');console.error(err);return;}
+  try{await commitMoodMutation('put',entry);}catch(err){if(button)button.disabled=false;setToast('保存失败，文字还在。请再试一次');console.error(err);return;}
   try{await clearDraft();}catch(err){console.warn('草稿清理失败，但正式心情已成功保存',err);}
   state.mood=null;state.note='';state.tags=[];state.showAllMoods=false;
-  try{await reload();await syncGrowth();state.tab='island';render();setToast(isNewDay?'心情收好啦，小岛长出了一点新风景 🌱':'心情收好啦！今天的每一刻都被珍藏了 ♡');}
+  try{await reload();await syncGrowth();state.tab='island';state.islandPage=0;state.sceneAnimation={kind:isNewDay?'grow':'weather',growthId:state.growth.find(g=>g.localDate===day)?.id,startedAt:performance.now(),duration:isNewDay?3800:2100};render();setToast(isNewDay?'心情收好啦，小岛长出了一点新风景 🌱':'心情收好啦！今天的每一刻都被珍藏了 ♡');}
   catch(err){console.error('心情已经写入，但画面刷新失败',err);state.tab='island';render();setToast('心情已保存。小岛暂时未刷新，可以重新打开查看。');}
 }
 
 function openEdit(id){const e=state.entries.find(x=>x.id===id);if(!e)return;state.editing=id;state.editMood=e.moodType;state.editTags=Array.isArray(e.tags)?e.tags.slice():[];state.editShowAllMoods=!QUICK_MOODS.has(e.moodType);state.editNote=e.note;state.editTime=formTime(e.occurredAt);render();}
-async function saveEdit(){const e=state.entries.find(x=>x.id===state.editing);if(!e)return;const d=new Date(state.editTime);if(!Number.isFinite(d.getTime())){setToast('请选择正确的日期时间');return;}if(!state.editMood||state.editNote.length>1000){setToast('请检查天气或文字长度');return;}try{const timeUnchanged=state.editTime===formTime(e.occurredAt);const changed={...e,moodType:state.editMood,tags:state.editTags.slice(),note:state.editNote.trim(),occurredAt:timeUnchanged?e.occurredAt:d.toISOString(),localDate:timeUnchanged?e.localDate:localDate(d),timezone:timeUnchanged?e.timezone:ZONE,updatedAt:new Date().toISOString()};await txSave('moods',changed);state.editing=null;await reload();await syncGrowth();state.selectedDay=changed.localDate;render();setToast('已经更新这段心情 ✨');}catch(err){setToast('修改失败，请重试');console.error(err);}}
-async function deleteEntry(id){if(!window.confirm('确定要删除这条心情吗？这一天对应的岛屿景观也可能变化。删除后可通过之前的备份恢复。'))return;try{await txDelete('moods',id);state.editing=null;await reload();await syncGrowth();render();setToast('已删除这条记录');}catch(e){setToast('删除失败，请重试');}}
+async function saveEdit(){const e=state.entries.find(x=>x.id===state.editing);if(!e)return;const d=new Date(state.editTime);if(!Number.isFinite(d.getTime())){setToast('请选择正确的日期时间');return;}if(!state.editMood||state.editNote.length>1000){setToast('请检查天气或文字长度');return;}try{const timeUnchanged=state.editTime===formTime(e.occurredAt);const changed={...e,moodType:state.editMood,tags:state.editTags.slice(),note:state.editNote.trim(),occurredAt:timeUnchanged?e.occurredAt:d.toISOString(),localDate:timeUnchanged?e.localDate:localDate(d),timezone:timeUnchanged?e.timezone:ZONE,updatedAt:new Date().toISOString()};await commitMoodMutation('put',changed);state.editing=null;await reload();await syncGrowth();state.selectedDay=changed.localDate;render();setToast('已经更新这段心情 ✨');}catch(err){setToast('修改失败，请重试');console.error(err);}}
+async function deleteEntry(id){if(!window.confirm('确定要删除这条心情吗？这一天对应的岛屿景观也可能变化。删除后可通过之前的备份恢复。'))return;try{await commitMoodMutation('delete',id);state.editing=null;await reload();await syncGrowth();render();setToast('已删除这条记录');}catch(e){setToast('删除失败，请重试');}}
 function iconsForDay(entries){if(!entries.length)return '';return MOOD_MAP[entries[0].moodType]?.icon||'☁️';}
 function nav(){return `<nav class="bottom-nav" aria-label="主导航">${[['island','🏝️','小岛'],['record','✏️','记录'],['calendar','🗓️','日历'],['review','💌','回顾']].map(([id,emoji,name])=>`<button class="nav-button ${state.tab===id?'active':''}" data-action="tab" data-tab="${id}" aria-label="${name}" aria-current="${state.tab===id?'page':'false'}"><span>${emoji}</span><span>${name}</span></button>`).join('')}</nav>`;}
 function head(){return `<header class="topbar"><div class="brand"><div class="brand-mark">🌤️</div><div><h1>心情天气</h1><small>MY LITTLE WEATHER</small></div></div><button class="icon-btn" data-action="tab" data-tab="settings" aria-label="设置与备份" title="设置与备份">⚙️</button></header>`;}
-function shell(content){root.innerHTML=head()+`<main class="main">${content}</main>`+nav()+ (state.editing?editModal():'');const cv=$('#island-canvas');if(cv)drawIsland(cv);}
+let islandFrameId=0;
+let lastIslandFrame=0;
+const reducedMotion=window.matchMedia?.('(prefers-reduced-motion: reduce)');
+function stopIslandLoop(){if(islandFrameId){cancelAnimationFrame(islandFrameId);islandFrameId=0;}}
+function startIslandLoop(canvas){
+  stopIslandLoop();lastIslandFrame=0;
+  const tick=(timestamp)=>{
+    if(!canvas.isConnected || document.visibilityState==='hidden'){islandFrameId=0;return;}
+    if(!lastIslandFrame || timestamp-lastIslandFrame>=42){drawIsland(canvas,timestamp);lastIslandFrame=timestamp;}
+    if(!reducedMotion?.matches)islandFrameId=requestAnimationFrame(tick);
+  };
+  if(reducedMotion?.matches){drawIsland(canvas,performance.now());return;}
+  islandFrameId=requestAnimationFrame(tick);
+}
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='hidden')stopIslandLoop();
+  else {const canvas=$('#island-canvas');if(canvas)startIslandLoop(canvas);}
+});
+function shell(content){
+  stopIslandLoop();
+  root.innerHTML=head()+`<main class="main">${content}</main>`+nav()+ (state.editing?editModal():'')+(state.activeMemory?memoryModal():'');
+  const cv=$('#island-canvas');if(cv)startIslandLoop(cv);
+}
+
 function island(){const latest=state.entries[0];const mood=latest?MOOD_MAP[latest.moodType]:null;const ev=state.growth.slice(-1)[0];const shouldBackup=needsBackup();return `
   <div class="eyebrow">WELCOME TO YOUR ISLAND ♡</div><h2 class="page-title" style="margin-top:5px">${state.growth.length?'今天也来看看小岛吧':'一切，从一片空地开始'}</h2><p class="intro">没有必须放晴的日子。你的每一种天气，都能留下自己的风景。</p>
-  <div class="panel spaced-top"><div class="island-scene"><div class="scene-top"><span class="pixel-tag">🌱 初始岛 · 第一片土地</span><span class="pixel-tag">${mood?mood.icon+' '+mood.name:'☁️ 等待第一场天气'}</span></div><canvas class="island-canvas" id="island-canvas" width="180" height="147" aria-label="空旷的像素小岛，随着心情记录慢慢生长"></canvas></div><div class="scene-bottom"><div><strong>${state.growth.length?`${state.growth.length} 处天气留下的痕迹`:'你的故事还没有开始'}</strong><span>${ev?`最近长出了：${MOOD_MAP[ev.mood]?.grow}`:'只有少量小草和石头，等你带来新的天气'}</span></div><button class="chip" data-action="memories">🌱 时光档案</button></div></div>
+  <div class="panel spaced-top"><div class="island-scene"><div class="scene-top"><span class="pixel-tag">🌱 初始岛 · 第一片土地</span><span class="pixel-tag">${mood?mood.icon+' '+mood.name:'☁️ 等待第一场天气'}</span></div><canvas class="island-canvas" id="island-canvas" width="180" height="147" aria-label="会随着记录生长的像素天气岛，可以轻点植物回忆当时的心情"></canvas></div><div class="scene-bottom"><div><strong>${state.growth.length?`${state.growth.length} 处天气留下的痕迹`:'你的故事还没有开始'}</strong><span>${ev?`最近长出了：${MOOD_MAP[ev.mood]?.grow}`:'只有少量小草和石头，等你带来新的天气'}</span></div></div><div class="scene-actions"><button class="chip" data-action="replay" ${state.growth.length?'':'disabled'}>🎞️ 看小岛长大</button><button class="chip" data-action="memories">🌱 时光档案</button>${state.growth.length>30?`<button class="chip" data-action="island-page" data-step="1" ${state.islandPage>=Math.ceil(state.growth.length/30)-1?'disabled':''}>◀ 旧日风景</button><button class="chip" data-action="island-page" data-step="-1" ${state.islandPage<=0?'disabled':''}>最近风景 ▶</button>`:''}</div><div class="scene-hint">${state.growth.length>30?`正在看第 ${state.islandPage+1} / ${Math.ceil(state.growth.length/30)} 页 · `:''}轻点植物，可以看见它诞生时的那段心情。</div></div>
   <div style="margin-top:20px"><button class="primary wide" data-action="tab" data-tab="record">✏️ 记录此刻心情 ♡</button></div>
   ${shouldBackup?`<div class="page-banner"><h3>☁️ 小小备份提醒</h3><p>有些回忆还没有确认备份。保存一份到 iCloud Drive，会更安心。</p><button class="inline-link" data-action="tab" data-tab="settings">去备份 →</button></div>`:''}
   <div class="section-head"><h3>🧺 最近的天气</h3><button class="inline-link" data-action="tab" data-tab="calendar">去日历看看 →</button></div>
@@ -124,40 +172,144 @@ function calendar(){const now=new Date(),cur=new Date(now.getFullYear(),now.getM
 function recordCard(e){const mood=MOOD_MAP[e.moodType]||MOOD_MAP.cloud;return `<article class="record-card"><div class="row"><span class="record-emoji">${mood.icon}</span><div><b style="font-size:13px">${mood.name}</b><p class="when">${readableTime(e.occurredAt)}</p></div></div>${Array.isArray(e.tags)&&e.tags.length?`<div class="record-tags">${e.tags.map(t=>`<span>${safe(t)}</span>`).join('')}</div>`:''}${e.note?`<p class="text">${safe(e.note)}</p>`:'<p class="text" style="color:#b79baa">这次没有写文字。</p>'}<div class="actions"><button data-action="edit" data-id="${safe(e.id)}">编辑</button><button data-action="delete" data-id="${safe(e.id)}">删除</button></div></article>`;}
 function getReportRange(){const now=new Date();if(state.period==='week'){const monday=new Date(now.getFullYear(),now.getMonth(),now.getDate()-(now.getDay()+6)%7+state.periodOffset*7);return {start:localDate(monday),end:localDate(addDays(monday,6)),label:`${monday.getMonth()+1}月${monday.getDate()}日 — ${addDays(monday,6).getMonth()+1}月${addDays(monday,6).getDate()}日`};}const first=new Date(now.getFullYear(),now.getMonth()+state.periodOffset,1);const last=new Date(first.getFullYear(),first.getMonth()+1,0);return {start:localDate(first),end:localDate(last),label:`${first.getFullYear()}年${first.getMonth()+1}月`};}
 function review(){const r=getReportRange();const xs=state.entries.filter(e=>e.localDate>=r.start&&e.localDate<=r.end);const days=new Set(xs.map(e=>e.localDate)).size;const dist=MOODS.map(m=>({...m,count:xs.filter(e=>e.moodType===m.id).length})).filter(m=>m.count>0);const counts=new Map();xs.forEach(e=>(Array.isArray(e.tags)?e.tags:[]).forEach(t=>counts.set(t,(counts.get(t)||0)+1)));const frequentTags=[...counts.entries()].sort((a,b)=>b[1]-a[1]).slice(0,8);const max=Math.max(1,...dist.map(x=>x.count));const top=[...dist].sort((a,b)=>b.count-a.count).filter(x=>x.count>0);const enough=xs.length>=3;const copy=xs.length===0?'这段时间还没有心情记录。可以继续生活、休息，等想记录时再来。':`这段时间你留下了 ${xs.length} 条心情，分布在 ${days} 天。${top.length?`出现最多的是「${top[0].name}」。`:''}${enough?'不同的天气都曾来过，它们一起构成了这段日子的样子。':'记录还比较少，我们暂时不急着分析趋势。'}\n\n这些只是基于实际天气选择的整理，并不代表对你的心理状态作出判断。愿你在自己的节奏里，慢慢生活。`;return `<div class="eyebrow">A LETTER FROM YOUR WEATHER</div><h2 class="page-title" style="margin-top:5px">💌 心情回顾</h2><p class="intro">统计不分好坏，只帮你看见这段时间发生过哪些天气。</p><div class="row spaced-top"><button class="secondary-btn" data-action="period" data-period="week" style="flex:1;${state.period==='week'?'background:#ffe5ee;border-color:#d98cac':''}">每周</button><button class="secondary-btn" data-action="period" data-period="month" style="flex:1;${state.period==='month'?'background:#ffe5ee;border-color:#d98cac':''}">每月</button></div><div class="calendar-header"><button class="mini-btn" data-action="report-step" data-step="-1">❮</button><span class="cal-month">${r.label}</span><button class="mini-btn" data-action="report-step" data-step="1">❯</button></div><div class="stat-grid"><div class="stat-card"><span>心情记录</span><strong>${xs.length} <small style="font-size:12px">条</small></strong></div><div class="stat-card"><span>记录天数</span><strong>${days} <small style="font-size:12px">天</small></strong></div></div><div class="panel panel-pad spaced-top"><div class="section-head" style="margin-top:0"><h3>🌈 天气分布</h3><span class="subtle">按记录条数</span></div>${dist.length?'':'<p class="intro">这段时间还没有天气记录。</p>'}${dist.map(m=>`<div class="dist-row"><span class="dist-label">${m.icon} ${m.name}</span><div class="dist-bar"><div class="dist-fill" style="width:${m.count/max*100}%"></div></div><span class="dist-count">${m.count}</span></div>`).join('')}</div>${frequentTags.length?`<div class="panel panel-pad spaced-top"><div class="section-head" style="margin-top:0"><h3>🏷️ 常出现的情绪标签</h3></div><div class="record-tags">${frequentTags.map(([t,n])=>`<span>${safe(t)} · ${n}</span>`).join('')}</div></div>`:''}<div class="section-head"><h3>✉️ 给自己的一封天气小信</h3></div><div class="letter"><div class="letter-head">🌤️ 本地温柔总结 <span style="font-size:10px;color:#ae94a0;font-weight:400">（非 AI）</span></div>${safe(copy)}</div><p class="tip">AI 总结仍在规划中。当前版本只在手机本地统计，绝不把你的文字日记发往网络。</p>`;}
-function needsBackup(){if(!state.entries.length)return false;const s=state.settings;const unsaved=state.entries.length-(s.lastBackupEntryCount||0);if(unsaved>=10)return true;if(!s.lastBackupConfirmedAt)return state.entries.length>=3;return (Date.now()-Date.parse(s.lastBackupConfirmedAt))>=7*86400000;}
+function needsBackup(){
+  if(!state.entries.length)return false;
+  const s=state.settings;
+  if(!s.lastBackupConfirmedAt || !Number.isInteger(s.lastBackupRevision))return true;
+  if(unbackedChanges()===0)return false;
+  return unbackedChanges()>=5 || Date.now()-Date.parse(s.lastBackupConfirmedAt)>=7*86400000;
+}
+
 function settings(){const s=state.settings;return `<div class="eyebrow">YOUR SAFE LITTLE CORNER</div><h2 class="page-title" style="margin-top:5px">⚙️ 设置与备份</h2><p class="intro">这本日记首先属于你。手机本地保存与 iCloud 文件备份是两件不同的事。</p>
-<div class="panel settings-section"><h3>☁️ 数据保存状态</h3><div class="backup-status">📱 当前已保存 ${state.entries.length} 条心情在本机数据库</div><p style="margin-top:9px">上次确认放入 iCloud：${s.lastBackupConfirmedAt?new Date(s.lastBackupConfirmedAt).toLocaleString('zh-CN'):'尚未确认'}</p><p>上次导出文件：${s.lastBackupExportedAt?new Date(s.lastBackupExportedAt).toLocaleString('zh-CN'):'尚未导出'}</p><div class="warning">⚠️ 本机保存不等于云备份。删除主屏幕 App、清理网站数据或手机故障，都可能让本机日记丢失。请定期将备份文件手动存入 iCloud Drive。</div><button class="settings-button" data-action="export">⬇️ 创建完整备份文件（JSON）</button><button class="settings-button" data-action="confirm-backup">✅ 我已将备份存入 iCloud Drive</button><button class="settings-button" data-action="choose-import">📂 从备份文件恢复</button><input id="backup-file" type="file" accept=".json,.moodbackup.json,application/json" hidden />
+<div class="panel settings-section"><h3>☁️ 数据保存状态</h3><div class="backup-status">📱 已在本机保存 ${state.entries.length} 条心情 · 尚未备份的改动：${unbackedChanges()} 次</div><p style="margin-top:9px">上次确认放入 iCloud：${s.lastBackupConfirmedAt?new Date(s.lastBackupConfirmedAt).toLocaleString('zh-CN'):'尚未确认'}</p><p>上次导出文件：${s.lastBackupExportedAt?new Date(s.lastBackupExportedAt).toLocaleString('zh-CN'):'尚未导出'}</p><div class="warning">⚠️ 本机保存不等于云备份。删除主屏幕 App、清理网站数据或手机故障，都可能让本机日记丢失。请定期将备份文件手动存入 iCloud Drive。</div><button class="settings-button" data-action="export">⬇️ 创建完整备份文件（JSON）</button><button class="settings-button" data-action="confirm-backup">✅ 我已在「文件」App 确认备份存在</button><p>⚠️ 导出文件不等于已保存到 iCloud。请在手机「文件」App 中确认，再点击上面的确认按钮。若导出后又编辑了心情，需要重新导出。</p><button class="settings-button" data-action="choose-import">📂 从备份文件恢复</button><input id="backup-file" type="file" accept=".json,.moodbackup.json,application/json" hidden />
 ${state.importData?restorePreview():''}</div>
 <div class="panel settings-section"><h3>📱 安装到 iPhone 主屏幕</h3><p>用 Safari 打开部署后的 HTTPS 地址 → 分享 → 添加到主屏幕 → 选择作为网页 App 打开。之后从桌面图标进入同一个 App。</p><div class="install-note">为避免资料看似消失，请从同一个主屏幕图标持续使用，不要默认 Safari 浏览器与桌面应用共享记录。</div></div>
 <div class="panel settings-section"><h3>🌱 关于你的小岛</h3><p>最初是一片空地。每个有记录的日期，最多留下一个长期景观；多次心情都照常保存。修改或删除记录会重新校对来源植物，绝不因为断更而让植物枯萎。</p><button class="settings-button" data-action="persistent">🔒 尝试申请持久化本机存储</button></div>
-<div class="panel settings-section"><h3>🔐 私密与未来功能</h3><p>当前没有账号、广告、追踪或 AI 文本上传。备份文件是包含私人文字的明文 JSON，请只保存在你信任的位置。加密备份、宠物、更多岛屿和角色都在后续版本规划中。</p></div><div class="footer-note">心情天气 v0.1.2 · 此刻你的世界刚刚发芽</div>`;}
+<div class="panel settings-section"><h3>🔐 私密与未来功能</h3><p>当前没有账号、广告、追踪或 AI 文本上传。备份文件是包含私人文字的明文 JSON，请只保存在你信任的位置。加密备份、宠物、更多岛屿和角色都在后续版本规划中。</p></div><div class="footer-note">心情天气 v0.2.0 · 记录和回忆随更新保留</div>`;}
 function restorePreview(){const b=state.importData;const n=b.data.moodEntries.length;const dates=b.data.moodEntries.map(e=>e.localDate).sort();return `<div class="divider"></div><h3>🧾 待恢复文件预览</h3><div class="preview-list">记录条数：${n}<br>日期范围：${n?dates[0]+' 至 '+dates[n-1]:'无记录'}<br>岛屿景观：${b.data.islandEvents.length} 处<br>备份时间：${safe(new Date(b.exportedAt).toLocaleString('zh-CN'))}</div><div class="warning">恢复将覆盖当前所有本机心情和小岛数据，不提供合并。请先下载当前数据保护副本并确认已经妥善保存。</div><button class="settings-button" data-action="protect">⬇️ 第一步：下载当前数据保护快照</button><label class="checkrow"><input id="confirm-protect" type="checkbox" ${state.protectConfirmed?'checked':''} ${state.protectDownloaded?'':'disabled'}>我已确认当前数据备份文件已妥善保存</label><button class="primary wide" style="margin-top:12px" data-action="restore" ${state.protectConfirmed?'':'disabled'}>第二步：确认覆盖并恢复</button><button class="inline-link" data-action="cancel-import">取消恢复</button>`;}
 function editModal(){const e=state.entries.find(x=>x.id===state.editing);if(!e)return '';return `<div class="modal-overlay"><section class="modal" role="dialog" aria-modal="true" aria-label="修改心情"><h2>✏️ 修改这段心情</h2><p class="intro">日期、天气和文字都可以改变。</p>${moodGrid(state.editMood,true)}${tagSelector(state.editMood,state.editTags,true)}<label class="field spaced-top">记录日期与时间<input id="edit-time" type="datetime-local" value="${safe(state.editTime)}" /></label><textarea id="edit-note" maxlength="1000" placeholder="想补充什么呢？">${safe(state.editNote)}</textarea><div class="counter"><span id="edit-counter">${state.editNote.length}</span> / 1000</div><div class="modal-actions"><button class="secondary-btn" data-action="cancel-edit">取消</button><button class="primary" data-action="save-edit">保存修改</button></div></section></div>`;}
+function memoryModal(){
+  const g=state.growth.find(x=>x.id===state.activeMemory);
+  if(!g)return '';
+  const entry=state.entries.find(e=>e.id===g.sourceEntryId);
+  const mood=MOOD_MAP[g.mood]||MOOD_MAP.cloud;
+  const all=state.entries.filter(e=>e.localDate===g.localDate);
+  return `<div class="modal-overlay"><section class="modal memory-modal" role="dialog" aria-modal="true" aria-label="植物与心情回忆"><div class="memory-flower">${mood.icon}</div><h2>${safe(mood.grow)}</h2><p class="intro">🌱 生长于 ${readableDay(g.localDate)}</p><p class="memory-note">${entry?.note?safe(entry.note):'这一天你没有写文字，但天气仍然被小岛珍藏。'}</p>${all.length>1?`<p class="intro">那天你一共留下 ${all.length} 条心情，都能在日历中找到。</p>`:''}<button class="primary wide spaced-top" data-action="close-memory">收好这段回忆 ♡</button></section></div>`;
+}
 function render(){switch(state.tab){case 'record':shell(record());break;case 'calendar':shell(calendar());break;case 'review':shell(review());break;case 'settings':shell(settings());break;default:shell(island());} }
 // Small, intentionally low-resolution pixel scene. No external image/font requests.
-function drawIsland(canvas){const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;const W=180,H=147;const latest=state.entries[0]?.moodType||'partly';let sky=['rain','downpour','storm','lightning'].includes(latest)?'#cbdbea':['moon','mist','whirlwind'].includes(latest)?'#b7bfdf':'#d9ebfc';if(latest==='storm'||latest==='whirlwind')sky='#b6bfd7';if(latest==='dawn')sky='#f6d9dc';if(latest==='warm')sky='#f8e9c9';if(latest==='overcast')sky='#d2dbe5';if(latest==='sleepy')sky='#dae6e5';ctx.fillStyle=sky;ctx.fillRect(0,0,W,H);
-  const r=(x,y,w,h,c)=>{ctx.fillStyle=c;ctx.fillRect(Math.round(x),Math.round(y),w,h);};const poly=(points,c)=>{ctx.fillStyle=c;ctx.beginPath();points.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();ctx.fill();};
-  for(let i=0;i<17;i++){const x=(i*43+17)%180,y=(i*27+9)%78;r(x,y,2,2,'#ffffff99');}
-  const cloud=(x,y)=>{r(x,y+6,31,7,'#fffdf8');r(x+5,y+1,11,12,'#fffdf8');r(x+17,y+3,10,10,'#fffdf8');r(x+3,y+13,25,2,'#d0dcf2');};cloud(14,19);cloud(139,31);
-  if(['sun','partly','rainbow','warm','dawn'].includes(latest)){r(139,12,18,18,'#f8d36c');r(143,8,10,27,'#f8d36c');r(134,17,28,8,'#f8d36c');r(143,18,2,2,'#9f704b');r(151,18,2,2,'#9f704b');}
-  if(latest==='moon'){r(144,11,20,22,'#ffefb5');r(151,7,17,20,sky);r(150,34,2,3,'#faf5d6');r(122,18,2,2,'#faf5d6');}
-  if(latest==='rainbow'){for(let k=0;k<5;k++){ctx.strokeStyle=['#f09fa8','#f4c47c','#a8d2a5','#afd3ed','#d2b9ed'][k];ctx.lineWidth=3;ctx.beginPath();ctx.arc(90,73,42-k*4,Math.PI,2*Math.PI);ctx.stroke();}}
-  if(['rain','downpour','storm','lightning','overcast'].includes(latest)){for(let i=0;i<32;i++){r((13+i*37)%180,(i*29+5)%80,1,5,'#8aabc9');}}
-  if(latest==='storm'||latest==='lightning'){r(138,8,6,18,'#fff4a3');r(134,24,8,4,'#fff4a3');r(132,28,6,11,'#fff4a3');}
-  if(latest==='mist'){for(let i=0;i<7;i++)r(10+i*24,56+i%3*7,35,2,'#f2f4f5a9');}
-  if(latest==='sleepy'){r(149,13,4,4,'#fcf6fc');r(154,8,5,5,'#fcf6fc');}
-  if(latest==='wind'||latest==='whirlwind'){for(let i=0;i<5;i++){r(24+i*30,40+i%2*7,21,2,'#ffffffa0');r(34+i*30,43+i%2*7,10,2,'#ffffff88');}}
-  if(latest==='downpour'){for(let i=0;i<15;i++)r((i*37+7)%180,(i*17+30)%75,2,7,'#8ba9c4');}
-  r(0,119,W,28,'#c4dfee');for(let i=0;i<8;i++)r(i*27+7,132+(i%3)*5,14,1,'#e9f6fc');
-  poly([[18,81],[88,51],[159,84],[94,113]],'#94b27b');poly([[18,81],[94,113],[94,130],[18,98]],'#b49276');poly([[94,113],[159,84],[159,99],[94,130]],'#9e7a60');poly([[24,81],[89,57],[153,84],[94,107]],'#bdd39c');poly([[51,83],[86,68],[128,84],[93,99]],'#d6c69d');
-  poly([[24,98],[94,130],[94,135],[24,103]],'#8e7361');r(23,87,3,7,'#e1c4a3');r(149,88,3,5,'#c5a282');
-  // The original island has only a few grass tufts and one rock.
-  r(43,84,2,5,'#76a36d');r(46,82,2,7,'#638f5f');r(126,90,2,6,'#76a36d');r(129,87,2,7,'#608d5d');poly([[125,78],[132,75],[139,79],[140,86],[129,89],[123,85]],'#a6a595');r(129,78,5,2,'#d1d0b9');
-  const positions=[[88,81],[70,80],[104,88],[58,89],[119,90],[80,94],[94,102],[111,101],[72,98],[92,71],[103,78],[54,80],[130,91],[95,95],[114,85],[74,87],[84,101],[65,91],[95,83],[111,94],[47,83],[124,81],[85,72],[61,84],[102,97],[88,92],[115,79],[78,77],[104,73],[132,84]];
-  const shown=state.growth.slice(0,30);shown.forEach((item,i)=>{const [x,y]=positions[item.position%positions.length];drawPlant(ctx,x,y,item.mood);});
-  if(state.growth.length===0){r(87,86,3,3,'#b9a37f');r(90,85,2,2,'#c6ad8a');}
-  canvas._spots=shown.map(item=>{const p=positions[item.position%positions.length];return {...item,x:p[0],y:p[1]};});
+const ISLAND_POSITIONS=[[88,81],[70,80],[104,88],[58,89],[119,90],[80,94],[94,102],[111,101],[72,98],[92,71],[103,78],[54,80],[130,91],[95,95],[114,85],[74,87],[84,101],[65,91],[95,83],[111,94],[47,83],[124,81],[85,72],[61,84],[102,97],[88,92],[115,79],[78,77],[104,73],[132,84]];
+function islandPageEvents(){
+  const pages=Math.max(1,Math.ceil(state.growth.length/30));
+  state.islandPage=Math.min(Math.max(0,state.islandPage),pages-1);
+  const end=Math.max(0,state.growth.length-state.islandPage*30);
+  return state.growth.slice(Math.max(0,end-30),end);
 }
+function replayGrowth(){
+  if(!state.growth.length){setToast('等第一株植物长出来，就能回放成长啦 🌱');return;}
+  state.islandPage=0;
+  state.sceneAnimation={kind:'replay',startedAt:performance.now(),duration:Math.min(18000,Math.max(5800,islandPageEvents().length*640+1200))};
+  render();
+  setToast('把时间轻轻拨回小岛的最初… 🎞️');
+}
+function drawIsland(canvas,now=0){
+  const ctx=canvas.getContext('2d');if(!ctx)return;
+  ctx.imageSmoothingEnabled=false;
+  const W=180,H=147;
+  const still=Boolean(reducedMotion?.matches);
+  const t=still?0:now/1000;
+  const latest=state.entries[0]?.moodType||'partly';
+  const rain=['rain','downpour','storm','lightning'].includes(latest);
+  const gale=['wind','whirlwind'].includes(latest);
+  const storm=['storm','lightning'].includes(latest);
+  let sky=rain?'#cbdbea':['moon','mist','whirlwind'].includes(latest)?'#b7bfdf':'#d9ebfc';
+  if(latest==='storm'||latest==='whirlwind')sky='#b6bfd7';
+  if(latest==='dawn')sky='#f6d9dc';
+  if(latest==='warm')sky='#f8e9c9';
+  if(latest==='overcast')sky='#d2dbe5';
+  if(latest==='sleepy')sky='#dae6e5';
+  ctx.clearRect(0,0,W,H);ctx.fillStyle=sky;ctx.fillRect(0,0,W,H);
+  const r=(x,y,w,h,c)=>{ctx.fillStyle=c;ctx.fillRect(Math.round(x),Math.round(y),w,h);};
+  const poly=(points,c)=>{ctx.fillStyle=c;ctx.beginPath();points.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();ctx.fill();};
+  const cloud=(x,y)=>{r(x,y+6,31,7,'#fffdf8');r(x+5,y+1,11,12,'#fffdf8');r(x+17,y+3,10,10,'#fffdf8');r(x+3,y+13,25,2,'#d0dcf2');};
+  for(let i=0;i<14;i++){r((i*43+17)%W,(i*27+9)%75,2,2,'#ffffff88');}
+  const drift=still?0:Math.round(Math.sin(t*0.30)*4);
+  cloud(14+drift,19);cloud(139-drift,31);
+  if(['sun','partly','rainbow','warm','dawn'].includes(latest)){
+    const pulse=still?0:Math.round(Math.sin(t*1.1)*1.5);
+    r(139,12,18,18,'#f8d36c');r(143,8-pulse,10,27+2*pulse,'#f8d36c');r(134-pulse,17,28+2*pulse,8,'#f8d36c');
+    r(143,18,2,2,'#9f704b');r(151,18,2,2,'#9f704b');
+    if(!still){r(132,43+Math.round(Math.sin(t)*2),2,3,'#fff4b5aa');r(160,41+Math.round(Math.sin(t+.8)*2),2,3,'#fff4b5aa');}
+  }
+  if(latest==='moon'){
+    r(144,11,20,22,'#ffefb5');r(151,7,17,20,sky);
+    for(let i=0;i<8;i++){const x=(i*31+17)%W,y=(i*13+8)%65;r(x,y,2,2,(still||Math.sin(t*1.8+i)>-.25)?'#fdf4de':'#bdc6e6');}
+  }
+  if(latest==='rainbow'){
+    for(let k=0;k<5;k++){ctx.strokeStyle=['#f09fa8','#f4c47c','#a8d2a5','#afd3ed','#d2b9ed'][k];ctx.lineWidth=3;ctx.beginPath();ctx.arc(90,73,42-k*4,Math.PI,2*Math.PI);ctx.stroke();}
+  }
+  if(rain){
+    const amount=latest==='downpour'?54:latest==='storm'?48:32;
+    for(let i=0;i<amount;i++){
+      const fall=still?0:t*(latest==='downpour'?56:latest==='rain'?32:43);
+      const x=((i*37+13+Math.floor(fall*.14))%W+W)%W;
+      const y=((i*29+5+Math.floor(fall))%106+106)%106;
+      r(x,y,latest==='downpour'?2:1,latest==='downpour'?7:4,'#84a8c9');
+    }
+  }
+  if(storm){
+    const flash= !still&&Math.sin(t*1.4)>0.96;
+    if(flash)r(0,0,W,H,'#f8f4ff77');
+    r(138,8,6,18,'#fff4a3');r(134,24,8,4,'#fff4a3');r(132,28,6,11,'#fff4a3');
+  }
+  if(latest==='mist'){
+    for(let i=0;i<7;i++)r(8+i*24+Math.round(Math.sin(t*.4+i)*3),56+i%3*7,35,2,'#f2f4f5a9');
+  }
+  if(latest==='sleepy'){r(149,13,4,4,'#fcf6fc');r(154,8,5,5,'#fcf6fc');}
+  if(gale){
+    for(let i=0;i<5;i++){const shift=still?0:Math.round(Math.sin(t*1.2+i)*5);r(24+i*30+shift,40+i%2*7,21,2,'#ffffffa0');r(34+i*30+shift,43+i%2*7,10,2,'#ffffff88');}
+  }
+  r(0,119,W,28,'#c4dfee');for(let i=0;i<8;i++)r(i*27+7,132+(i%3)*5,14,1,'#e9f6fc');
+  poly([[18,81],[88,51],[159,84],[94,113]],'#94b27b');
+  poly([[18,81],[94,113],[94,130],[18,98]],'#b49276');
+  poly([[94,113],[159,84],[159,99],[94,130]],'#9e7a60');
+  poly([[24,81],[89,57],[153,84],[94,107]],'#bdd39c');
+  poly([[51,83],[86,68],[128,84],[93,99]],'#d6c69d');
+  poly([[24,98],[94,130],[94,135],[24,103]],'#8e7361');r(23,87,3,7,'#e1c4a3');r(149,88,3,5,'#c5a282');
+  // Empty at first: a few tufts and one rock, not a pre-made garden.
+  r(43,84,2,5,'#76a36d');r(46,82,2,7,'#638f5f');
+  r(126,90,2,6,'#76a36d');r(129,87,2,7,'#608d5d');
+  poly([[125,78],[132,75],[139,79],[140,86],[129,89],[123,85]],'#a6a595');r(129,78,5,2,'#d1d0b9');
+  const shown=islandPageEvents();
+  let anim=state.sceneAnimation;
+  if(still && anim){state.sceneAnimation=null;anim=null;}
+  if(anim && now>=anim.startedAt+anim.duration){state.sceneAnimation=null;anim=null;}
+  const spots=[];
+  shown.forEach((item,i)=>{
+    const [x,y]=ISLAND_POSITIONS[item.position%ISLAND_POSITIONS.length];
+    let grow=1;
+    if(anim?.kind==='grow'&&anim.growthId===item.id){grow=Math.max(0,Math.min(1,(now-anim.startedAt)/anim.duration));}
+    if(anim?.kind==='replay'){
+      const delay=500+i*((anim.duration-1300)/Math.max(1,shown.length));
+      grow=Math.max(0,Math.min(1,(now-anim.startedAt-delay)/700));
+    }
+    if(grow<=0)return;
+    if(grow<.27){r(x-2,y-2,5,3,'#a18a66');r(x,y-4,2,3,'#d5b78c');}
+    else if(grow<.57){r(x,y-7,2,8,'#629262');r(x-3,y-7,4,3,'#a1bf80');r(x+1,y-9,4,3,'#a1bf80');}
+    else{
+      const scale=.52+.48*Math.min(1,(grow-.57)/.43);
+      ctx.save();ctx.translate(x,y);ctx.scale(scale,scale);ctx.translate(-x,-y);drawPlant(ctx,x,y,item.mood);ctx.restore();
+    }
+    if(grow<1 && !still){
+      const sparkle=Math.sin(t*9+i)*2;
+      r(x+10,y-21+sparkle,2,2,'#ffeed0');r(x-12,y-13-sparkle,2,2,'#faf0b6');
+    }
+    spots.push({...item,x,y});
+  });
+  if(state.growth.length===0){r(87,86,3,3,'#b9a37f');r(90,85,2,2,'#c6ad8a');}
+  canvas._spots=spots;
+}
+
 function drawPlant(c,x,y,type){const r=(a,b,w,h,col)=>{c.fillStyle=col;c.fillRect(Math.round(a),Math.round(b),w,h);};
   if(type==='sun'){r(x-1,y-9,2,10,'#608e54');r(x-5,y-14,10,7,'#f8d378');r(x-3,y-16,6,11,'#f6bf56');r(x-1,y-12,3,3,'#ae814a');r(x-4,y-4,3,2,'#86b572');}
   else if(type==='rain'){r(x-1,y-8,3,10,'#fcebd8');r(x-6,y-14,13,7,'#be8491');r(x-4,y-17,9,8,'#d79eaa');r(x-3,y-12,2,2,'#fff8e4');r(x+3,y-12,2,2,'#fff8e4');}
@@ -177,22 +329,29 @@ function drawPlant(c,x,y,type){const r=(a,b,w,h,col)=>{c.fillStyle=col;c.fillRec
 }
 function memories(){const list=state.growth.slice().reverse();const body=`<div class="eyebrow">THE ISLAND REMEMBERS</div><h2 class="page-title">🌱 岛屿时光档案</h2><p class="intro">每个有记录的日子，最多长出一处风景。它们会一直在这里。</p>${list.length?list.map(g=>{const entry=state.entries.find(e=>e.id===g.sourceEntryId);return `<div class="record-card"><div class="row"><span class="record-emoji">${MOOD_MAP[g.mood]?.icon||'🌱'}</span><div><b style="font-size:13px">${MOOD_MAP[g.mood]?.grow||'小植物'}</b><p class="when">${readableDay(g.localDate)}</p></div></div>${entry?.note?`<p class="text">${safe(entry.note)}</p>`:'<p class="text" style="color:#ab8a98">这一天，天气在岛上悄悄留下了痕迹。</p>'}</div>`;}).join(''):'<div class="empty"><div class="big">🌱</div>这里还没有成长记录。</div>'}<button class="secondary-btn wide spaced-top" data-action="tab" data-tab="island" style="width:100%">返回小岛</button>`;shell(body);}
 async function sha256(s){if(!crypto?.subtle)throw new Error('请在 HTTPS 或 localhost 环境下备份');const bytes=new TextEncoder().encode(s);return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');}
-async function makeBackup(){const entries=await getAll('moods');const growth=await getAll('growth');const settings=(await getOne('meta','settings'))?.value||{};const payload={format:'mood-weather-backup',schemaVersion:1,exportedAt:new Date().toISOString(),appVersion:'0.1.2',data:{moodEntries:entries,islandEvents:growth,settings,islands:[],islandObjects:[],pets:[],reportSnapshots:[]}};return {...payload,checksum:await sha256(JSON.stringify(payload))};}
+async function makeBackup(){const entries=await getAll('moods');const growth=await getAll('growth');const settings=(await getOne('meta','settings'))?.value||{};const payload={format:'mood-weather-backup',schemaVersion:1,exportedAt:new Date().toISOString(),appVersion:'0.2.0',data:{moodEntries:entries,islandEvents:growth,settings,islands:[],islandObjects:[],pets:[],reportSnapshots:[]}};return {...payload,checksum:await sha256(JSON.stringify(payload))};}
 function fileDownload(obj,suffix=''){const s=JSON.stringify(obj,null,2);const blob=new Blob([s],{type:'application/json;charset=utf-8'});const u=URL.createObjectURL(blob);const a=document.createElement('a');const d=new Date();a.href=u;a.download=`心情天气_${suffix}备份_${localDate(d)}_${pad(d.getHours())}${pad(d.getMinutes())}.moodbackup.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),60000);}
-async function exportBackup(protect=false){try{const obj=await makeBackup();fileDownload(obj,protect?'保护快照_':'');if(protect){state.protectDownloaded=true;}else{state.settings.lastBackupExportedAt=new Date().toISOString();await saveSettings();}render();setToast('备份已生成，请在文件 App 中保存到 iCloud Drive');}catch(e){setToast('无法导出备份：'+e.message);}}
+async function exportBackup(protect=false){try{const obj=await makeBackup();fileDownload(obj,protect?'保护快照_':'');if(protect){state.protectDownloaded=true;}else{state.settings.lastBackupExportedAt=new Date().toISOString();state.settings.lastBackupExportedRevision=state.settings.dataRevision;await saveSettings();}render();setToast('备份已生成，请在文件 App 中保存到 iCloud Drive');}catch(e){setToast('无法导出备份：'+e.message);}}
 function validateEntry(x){return x&&typeof x.id==='string'&&x.id.length<150&&MOOD_MAP[x.moodType]&&typeof x.note==='string'&&x.note.length<=1000&&(x.tags===undefined||(Array.isArray(x.tags)&&x.tags.length<=3&&x.tags.every(t=>typeof t==='string'&&t.length>0&&t.length<=30)&&new Set(x.tags).size===x.tags.length))&&typeof x.occurredAt==='string'&&Number.isFinite(Date.parse(x.occurredAt))&&/^\d{4}-\d{2}-\d{2}$/.test(x.localDate)&&typeof x.createdAt==='string'&&typeof x.updatedAt==='string'&&typeof x.timezone==='string';}
 function validateEvent(g){return g&&typeof g.id==='string'&&typeof g.localDate==='string'&&typeof g.sourceEntryId==='string'&&MOOD_MAP[g.mood]&&Number.isInteger(g.position)&&g.position>=0&&typeof g.createdAt==='string';}
 async function parseBackup(file){if(file.size>12*1024*1024)throw new Error('备份文件超过 12MB');let obj;try{obj=JSON.parse(await file.text());}catch{throw new Error('文件不是有效 JSON');}if(!obj||obj.format!=='mood-weather-backup'||obj.schemaVersion!==1)throw new Error('不支持的备份格式或版本');if(typeof obj.checksum!=='string'||!/^[0-9a-f]{64}$/.test(obj.checksum))throw new Error('缺少校验信息');const {checksum,...payload}=obj;const actual=await sha256(JSON.stringify(payload));if(actual!==checksum)throw new Error('文件完整性校验失败，可能已被修改或损坏');const d=obj.data;if(!d||!Array.isArray(d.moodEntries)||!Array.isArray(d.islandEvents)||!d.settings||typeof d.settings!=='object'||Array.isArray(d.settings))throw new Error('备份字段不完整');if(d.moodEntries.length>50000||d.islandEvents.length>50000)throw new Error('备份数据量异常');if(!d.moodEntries.every(validateEntry)||!d.islandEvents.every(validateEvent))throw new Error('记录或岛屿数据格式不正确');const ids=new Set(d.moodEntries.map(x=>x.id));if(ids.size!==d.moodEntries.length)throw new Error('记录 ID 存在重复');if(new Set(d.islandEvents.map(x=>x.id)).size!==d.islandEvents.length||new Set(d.islandEvents.map(x=>x.localDate)).size!==d.islandEvents.length)throw new Error('景观记录存在重复');if(!d.islandEvents.every(x=>ids.has(x.sourceEntryId)&&d.moodEntries.find(e=>e.id===x.sourceEntryId)?.localDate===x.localDate))throw new Error('景观来源记录不完整');return obj;}
-async function restoreBackup(){if(!state.importData||!state.protectConfirmed)return;if(!window.confirm('最后确认：这会完全覆盖此 iPhone 当前的心情与小岛数据。是否继续？'))return;const d=state.importData.data;try{await new Promise((resolve,reject)=>{const t=db.transaction(['moods','growth','meta','drafts'],'readwrite');for(const table of ['moods','growth','meta','drafts'])t.objectStore(table).clear();d.moodEntries.forEach(x=>t.objectStore('moods').put(x));d.islandEvents.forEach(x=>t.objectStore('growth').put(x));t.objectStore('meta').put({key:'settings',value:d.settings});t.oncomplete=resolve;t.onerror=()=>reject(t.error);t.onabort=()=>reject(t.error);});state.importData=null;state.protectDownloaded=false;state.protectConfirmed=false;state.mood=null;state.note='';state.tags=[];await reload();state.tab='island';render();setToast('恢复成功！欢迎回到你的小岛 ♡');}catch(e){console.error(e);setToast('恢复失败，原数据未被替换');}}
+async function restoreBackup(){if(!state.importData||!state.protectConfirmed)return;if(!window.confirm('最后确认：这会完全覆盖此 iPhone 当前的心情与小岛数据。是否继续？'))return;const d=state.importData.data;try{await new Promise((resolve,reject)=>{const t=db.transaction(['moods','growth','meta','drafts'],'readwrite');for(const table of ['moods','growth','meta','drafts'])t.objectStore(table).clear();d.moodEntries.forEach(x=>t.objectStore('moods').put(x));d.islandEvents.forEach(x=>t.objectStore('growth').put(x));t.objectStore('meta').put({key:'settings',value:{...d.settings,lastBackupConfirmedAt:null,lastBackupRevision:null,lastBackupExportedRevision:null,dataRevision:Number.isInteger(d.settings.dataRevision)?d.settings.dataRevision+1:1}});t.oncomplete=resolve;t.onerror=()=>reject(t.error);t.onabort=()=>reject(t.error);});state.importData=null;state.protectDownloaded=false;state.protectConfirmed=false;state.mood=null;state.note='';state.tags=[];await reload();state.tab='island';render();setToast('恢复成功！欢迎回到你的小岛 ♡');}catch(e){console.error(e);setToast('恢复失败，原数据未被替换');}}
 async function persistStorage(){if(!navigator.storage?.persist){setToast('当前浏览器不提供持久化存储申请');return;}try{const ok=await navigator.storage.persist();setToast(ok?'已获得持久化存储支持，仍请定期备份':'未获得持久化权限，请定期备份');}catch(e){setToast('无法申请持久化存储');}}
-function changeTab(tab){state.tab=tab;state.editing=null;render();window.scrollTo({top:0,behavior:'instant'});}
+function changeTab(tab){state.tab=tab;state.editing=null;state.activeMemory=null;render();window.scrollTo({top:0,behavior:'instant'});}
 root.addEventListener('input',e=>{if(e.target.id==='note'){state.note=e.target.value;const el=$('#note-counter');if(el)el.textContent=state.note.length;queueDraft();}if(e.target.id==='edit-note'){state.editNote=e.target.value;const el=$('#edit-counter');if(el)el.textContent=state.editNote.length;}if(e.target.id==='edit-time')state.editTime=e.target.value;});
 root.addEventListener('change',async e=>{if(e.target.id==='confirm-protect'){state.protectConfirmed=e.target.checked;render();}if(e.target.id==='backup-file'&&e.target.files?.length){try{state.importData=await parseBackup(e.target.files[0]);state.protectDownloaded=false;state.protectConfirmed=false;render();setToast('校验通过，请先保护当前记录');}catch(err){state.importData=null;render();setToast('无法读取备份：'+err.message);}}});
 root.addEventListener('click',async event=>{const btn=event.target.closest('[data-action]');if(!btn)return;const action=btn.dataset.action;try{switch(action){case 'tab':changeTab(btn.dataset.tab);break;case 'mood':state.mood=btn.dataset.mood;state.tags=[];state.showAllMoods=false;queueDraft();render();break;
   case 'toggle-moods':state.showAllMoods=!state.showAllMoods;render();break;
   case 'edit-toggle-moods':state.editShowAllMoods=!state.editShowAllMoods;render();break;
   case 'tag':{const tag=btn.dataset.tag;state.tags=state.tags.includes(tag)?state.tags.filter(t=>t!==tag):state.tags.length<3?[...state.tags,tag]:state.tags;if(state.tags.length===3&& !state.tags.includes(tag))setToast('最多选择 3 个标签哦');queueDraft();render();break;}
-  case 'edit-tag':{const tag=btn.dataset.tag;state.editTags=state.editTags.includes(tag)?state.editTags.filter(t=>t!==tag):state.editTags.length<3?[...state.editTags,tag]:state.editTags;if(state.editTags.length===3&&!state.editTags.includes(tag))setToast('最多选择 3 个标签哦');render();break;}case 'save-mood':await saveMood();break;case 'month':state.monthOffset+=Number(btn.dataset.step);state.selectedDay=localDate(new Date(new Date().getFullYear(),new Date().getMonth()+state.monthOffset,1));render();break;case 'today':state.monthOffset=0;state.selectedDay=today();render();break;case 'day':state.selectedDay=btn.dataset.day;render();break;case 'edit':openEdit(btn.dataset.id);break;case 'edit-mood':state.editMood=btn.dataset.mood;state.editTags=[];state.editShowAllMoods=false;render();break;case 'cancel-edit':state.editing=null;render();break;case 'save-edit':await saveEdit();break;case 'delete':await deleteEntry(btn.dataset.id);break;case 'period':state.period=btn.dataset.period;state.periodOffset=0;render();break;case 'report-step':state.periodOffset+=Number(btn.dataset.step);render();break;case 'memories':memories();break;case 'export':await exportBackup();break;case 'protect':await exportBackup(true);break;case 'confirm-backup':if(window.confirm('你已经在 iPhone「文件」App 中确认，备份文件保存在 iCloud Drive 里了吗？\n请不要仅因为点过导出，就确认已经云备份。')){state.settings.lastBackupConfirmedAt=new Date().toISOString();state.settings.lastBackupEntryCount=state.entries.length;await saveSettings();render();setToast('已记录你的备份确认 ♡');}break;case 'choose-import':$('#backup-file')?.click();break;case 'restore':await restoreBackup();break;case 'cancel-import':state.importData=null;state.protectDownloaded=false;state.protectConfirmed=false;render();break;case 'persistent':await persistStorage();break;default:break;}}catch(err){console.error(err);setToast('出现了一点小问题：'+(err.message||'请重试'));}});
-root.addEventListener('click',e=>{if(e.target.id!=='island-canvas')return;const c=e.target;const box=c.getBoundingClientRect();const x=(e.clientX-box.left)/box.width*c.width;const y=(e.clientY-box.top)/box.height*c.height;const hit=(c._spots||[]).slice().reverse().find(p=>Math.abs(p.x-x)<8&&Math.abs(p.y-y)<12);if(!hit)return;const entry=state.entries.find(a=>a.id===hit.sourceEntryId);const date=hit.localDate;window.alert(`${MOOD_MAP[hit.mood].icon} ${MOOD_MAP[hit.mood].grow}\n长于 ${readableDay(date)}\n\n${entry?.note||'那天你没有写下文字，但留下了一片天气。'}`);});
+  case 'edit-tag':{const tag=btn.dataset.tag;state.editTags=state.editTags.includes(tag)?state.editTags.filter(t=>t!==tag):state.editTags.length<3?[...state.editTags,tag]:state.editTags;if(state.editTags.length===3&&!state.editTags.includes(tag))setToast('最多选择 3 个标签哦');render();break;}case 'save-mood':await saveMood();break;case 'month':state.monthOffset+=Number(btn.dataset.step);state.selectedDay=localDate(new Date(new Date().getFullYear(),new Date().getMonth()+state.monthOffset,1));render();break;case 'today':state.monthOffset=0;state.selectedDay=today();render();break;case 'day':state.selectedDay=btn.dataset.day;render();break;case 'edit':openEdit(btn.dataset.id);break;case 'edit-mood':state.editMood=btn.dataset.mood;state.editTags=[];state.editShowAllMoods=false;render();break;case 'cancel-edit':state.editing=null;render();break;case 'save-edit':await saveEdit();break;case 'delete':await deleteEntry(btn.dataset.id);break;case 'period':state.period=btn.dataset.period;state.periodOffset=0;render();break;case 'report-step':state.periodOffset+=Number(btn.dataset.step);render();break;case 'memories':memories();break;case 'replay':replayGrowth();break;case 'island-page':state.islandPage+=Number(btn.dataset.step);state.sceneAnimation=null;render();break;case 'close-memory':state.activeMemory=null;render();break;case 'export':await exportBackup();break;case 'protect':await exportBackup(true);break;case 'confirm-backup':if(state.settings.lastBackupExportedRevision!==state.settings.dataRevision || !state.settings.lastBackupExportedAt){setToast('记录有更新，请先重新导出最新备份');break;}if(window.confirm('请先到「文件」App 确认最新备份文件已经保存在 iCloud Drive。\n仅仅点击“导出”并不代表已云备份。确认文件确实存在吗？')){state.settings.lastBackupConfirmedAt=new Date().toISOString();state.settings.lastBackupRevision=state.settings.dataRevision;state.settings.lastBackupEntryCount=state.entries.length;await saveSettings();render();setToast('已记录你的备份确认 ♡');}break;case 'choose-import':$('#backup-file')?.click();break;case 'restore':await restoreBackup();break;case 'cancel-import':state.importData=null;state.protectDownloaded=false;state.protectConfirmed=false;render();break;case 'persistent':await persistStorage();break;default:break;}}catch(err){console.error(err);setToast('出现了一点小问题：'+(err.message||'请重试'));}});
+root.addEventListener('click',e=>{
+  if(e.target.id!=='island-canvas')return;
+  const c=e.target,box=c.getBoundingClientRect();
+  const x=(e.clientX-box.left)/box.width*c.width,y=(e.clientY-box.top)/box.height*c.height;
+  const hit=(c._spots||[]).slice().reverse().find(p=>Math.abs(p.x-x)<9&&Math.abs(p.y-y)<16);
+  if(!hit)return;
+  state.activeMemory=hit.id;render();
+});
 async function boot(){try{db=await doOpen();await reload();const draft=await getOne('drafts','record');if(draft){state.mood=MOOD_MAP[draft.mood]?draft.mood:null;state.note=typeof draft.note==='string'?draft.note:'';state.tags=Array.isArray(draft.tags)?draft.tags.filter(t=>typeof t==='string').slice(0,3):[];state.showAllMoods=Boolean(state.mood&&!QUICK_MOODS.has(state.mood));}await syncGrowth();render();if('serviceWorker'in navigator && location.protocol!=='file:')navigator.serviceWorker.register('./sw.js').catch(err=>console.warn('离线缓存注册失败',err));}catch(err){root.innerHTML=`<div class="main" style="padding-top:75px"><h2 class="page-title">☁️ 小岛暂时打不开</h2><p class="intro">${safe(err.message||'无法访问本地数据库')}。请使用 Safari 或 Chrome 正常浏览模式，并检查设备存储空间。</p><p class="tip">为了保护日记，程序不会自动清空数据库。</p><button class="secondary-btn spaced-top" onclick="location.reload()">再试一次</button></div>`;console.error(err);}}
 boot();
