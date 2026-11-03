@@ -27,3 +27,14 @@
 @media(max-width:365px){.mood-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.mood{min-height:87px}.mood .emoji{font-size:28px}.modal .mood-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 
 .mood-selected-summary{margin-top:13px;display:flex;align-items:center;justify-content:space-between;gap:7px;padding:10px 12px;border:1.5px solid #e6b7ce;border-radius:12px;background:#fff0f4;color:#985770;font-size:12px;font-weight:700}.mood-selected-summary button{border:1px solid #dab3c3;padding:5px 9px;background:white;border-radius:9px;font-size:11px;white-space:nowrap}
+/* v0.2.0 animated island and archive */
+.scene-actions{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px 5px;background:#fff4f2;border-top:1px solid #f3dee2}
+.scene-actions .chip{min-height:39px;font-size:12px;font-weight:800;color:#885d78;border:1px solid #e2bcca;background:#fffefa;white-space:normal;flex:1 1 132px;text-align:center;cursor:pointer}
+.scene-actions .chip:active{transform:translateY(1px)}
+.scene-actions .chip:disabled{opacity:.42;cursor:not-allowed}
+.scene-hint{font-size:11px;line-height:1.65;padding:4px 15px 12px;background:#fff4f2;color:#a07d8e}
+.island-canvas{touch-action:manipulation;cursor:pointer}
+.memory-modal{text-align:center;padding:24px 20px}
+.memory-modal .memory-flower{width:68px;height:68px;display:grid;place-items:center;margin:0 auto 8px;background:#fff1df;border:2px solid #eed0c9;border-radius:18px;font-size:38px}
+.memory-modal .memory-note{margin-top:18px;background:#fff7f1;border:1px solid #f2e0d8;border-radius:14px;padding:14px;text-align:left;font-size:14px;line-height:1.85;color:#876676;white-space:pre-wrap;overflow-wrap:anywhere}
+@media (prefers-reduced-motion:reduce){.island-canvas{transition:none}}
