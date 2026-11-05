@@ -59,7 +59,19 @@ GitHub Pages 地址：`https://yuxiangrosy.github.io/heart-weather/`
 python3 -m http.server 4173
 ```
 
-浏览器打开 `http://localhost:4173/`。`tests/test_v020_mock.py` 已在本环境通过 Chromium + 模拟 IndexedDB 的交互回归。`tests/test_v020_real.py` 是可在支持本地 HTTP 的电脑上运行的真实 IndexedDB / Service Worker 测试；如果另行提供旧版解压目录，并设置 `HEART_WEATHER_V012_DIR` 环境变量，还会执行升级兼容测试；本次运行环境阻止 Chromium 访问本地网址，因此**该真实测试尚未跑通**。这两类测试都不能代替你在 iPhone Safari 上的实测。
+浏览器打开 `http://localhost:4173/`。
+
+真实 IndexedDB / Service Worker / 文件恢复回归：
+
+```bash
+npm ci
+npx playwright install --with-deps chromium
+npm test
+```
+
+测试仅操作临时 localhost 源与合成日记，并用 git 历史中的 v0.1.2 原代码执行升级回归。PR 自动检查不部署生产站点。覆盖范围、结果与 iPhone 待验收项见 [安全验收记录](docs/SAFETY_ACCEPTANCE.md)。
+
+`tests/test_app_mock.py` 和 `tests/test_v012_mock.py` 是历史模拟测试，含硬编码浏览器路径及旧版本断言，不能作为 v0.2.0 发布通过证据。此前 README 提及的 `test_v020_mock.py` / `test_v020_real.py` 未在仓库提交；本轮补齐可复现入口。桌面自动检查不能替代 iPhone 主屏幕 PWA 实测。
 
 ## 仍需 iPhone 实测的项目
 
