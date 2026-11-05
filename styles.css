@@ -38,3 +38,11 @@
 .memory-modal .memory-flower{width:68px;height:68px;display:grid;place-items:center;margin:0 auto 8px;background:#fff1df;border:2px solid #eed0c9;border-radius:18px;font-size:38px}
 .memory-modal .memory-note{margin-top:18px;background:#fff7f1;border:1px solid #f2e0d8;border-radius:14px;padding:14px;text-align:left;font-size:14px;line-height:1.85;color:#876676;white-space:pre-wrap;overflow-wrap:anywhere}
 @media (prefers-reduced-motion:reduce){.island-canvas{transition:none}}
+
+/* Saved letters extend the existing review page. */
+.letter-card{display:block;width:100%;text-align:left;color:inherit;font:inherit;cursor:pointer;background:#fffaf5;min-height:76px}
+.letter-card-title{display:block;font-size:13px;line-height:1.7;margin-bottom:6px;font-weight:700}
+.letter-card:focus-visible{outline:3px solid #b4a8d9;outline-offset:3px}
+.letter-quote{margin:14px 0;padding:14px;border-left:3px solid #d7b3c8;background:#fff8f2;white-space:pre-wrap;overflow-wrap:anywhere}
+#letter-archive{scroll-margin-top:20px}
+.stat-card strong small{font-size:12px}

@@ -1,6 +1,10 @@
 {
   "name": "heart-weather-checks",
   "private": true,
-  "scripts": {"test": "node tests/test_safety.cjs"},
-  "devDependencies": {"playwright": "1.56.1"}
+  "scripts": {
+    "test": "node --test tests/test_letters_unit.cjs && node tests/test_safety.cjs && node tests/test_letters_browser.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
 }
