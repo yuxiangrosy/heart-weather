@@ -6,7 +6,7 @@
 - 所有破坏性测试仅使用临时 localhost 源、全新浏览器上下文、合成日记；不读取生产站点或私人备份。
 - 新增可复现测试：`npm ci && npx playwright install --with-deps chromium && npm test`。
 - 自动检查由 PR 触发；不自动部署或合并。
-- 本环境已完成 JavaScript 语法检查。浏览器下载经备用源成功，但启动被执行环境的 socket 权限拒绝；**尚未得到真实浏览器通过结果**，需以 PR 自动检查为准。
+- 本环境已通过 JavaScript 语法检查与 Chromium 141 headless shell 真实浏览器回归（2026-11-05）。完整 Chrome 启动受环境限制，改用标准 Playwright headless shell 成功运行；PR 自动检查作为后续持续验证。
 
 ## 自动覆盖范围
 

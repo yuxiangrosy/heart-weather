@@ -44,16 +44,17 @@ async function save(page,note='合成测试：雨天也很好'){
  await page.waitForFunction('navigator.serviceWorker.controller');
  console.log('PASS real v0.1.2 → current upgrade: notes/tags/growth/DB v1');
  // Export through UI download, mutate, select the actual file, protect, restore.
- await page.locator('[data-tab="settings"]').click();
+ await page.locator('[data-tab="settings"]').first().click();
  await page.locator('[data-action="confirm-backup"]').click();
  assert.match(await page.locator('.toast').innerText(),/重新导出/);
  const downloadPromise=page.waitForEvent('download');await page.locator('[data-action="export"]').click();
  const backup=JSON.parse(fs.readFileSync(await (await downloadPromise).path(),'utf8'));
+ await page.waitForFunction("document.querySelector('.toast')?.textContent.includes('备份已生成')");
  assert.equal(await page.evaluate('state.settings.lastBackupConfirmedAt'),null);
- await page.evaluate("async()=>{await commitMoodMutation('put',{...state.entries[0],note:'已编辑'});await reload();render()}");
- await page.locator('[data-action="confirm-backup"]').click();assert.match(await page.locator('.toast').innerText(),/重新导出/);
- await page.evaluate("async()=>{await commitMoodMutation('delete',state.entries[0].id);await reload();await syncGrowth();render()}");
- await page.locator('[data-action="confirm-backup"]').click();assert.match(await page.locator('.toast').innerText(),/重新导出/);
+ await page.evaluate("(async()=>{await commitMoodMutation('put',{...state.entries[0],note:'已编辑'});await reload();render()})()");
+ await page.locator('[data-action="confirm-backup"]').click();await page.waitForFunction("document.querySelector('.toast')?.textContent.includes('重新导出')");assert.match(await page.locator('.toast').innerText(),/重新导出/);
+ await page.evaluate("(async()=>{await commitMoodMutation('delete',state.entries[0].id);await reload();await syncGrowth();render()})()");
+ await page.locator('[data-action="confirm-backup"]').click();await page.waitForFunction("document.querySelector('.toast')?.textContent.includes('重新导出')");assert.match(await page.locator('.toast').innerText(),/重新导出/);
  await page.locator('#backup-file').setInputFiles({name:'synthetic.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(backup))});
  assert.equal(await page.locator('[data-action="restore"]').isDisabled(),true);
  const protection=page.waitForEvent('download');await page.locator('[data-action="protect"]').click();await protection;
@@ -73,11 +74,11 @@ async function save(page,note='合成测试：雨天也很好'){
  await context.setOffline(false);await page.reload();await page.waitForSelector('#island-canvas');
  assert.equal(await page.evaluate('state.entries.length'),2);
  console.log('PASS offline fresh-page cold start + offline save + reconnect persistence');
- await page.evaluate(`async()=>{for(let i=1;i<=34;i++){const d=localDate(addDays(new Date(),-i));const e={...state.entries[0],id:'synthetic-'+i,localDate:d,occurredAt:d+'T02:00:00.000Z'};await commitMoodMutation('put',e)}await reload();await syncGrowth();render()}`);
+ await page.evaluate(`(async()=>{for(let i=1;i<=34;i++){const d=localDate(addDays(new Date(),-i));const e={...state.entries[0],id:'synthetic-'+i,localDate:d,occurredAt:d+'T02:00:00.000Z'};await commitMoodMutation('put',e)}await reload();await syncGrowth();render()})()`);
  assert.equal(await page.evaluate('islandPageEvents().length'),30);
  await page.locator('[data-action="island-page"][data-step="1"]').click();assert.equal(await page.evaluate('islandPageEvents().length'),5);
  await page.emulateMedia({reducedMotion:'reduce'});await page.evaluate('render()');assert.equal(await page.evaluate('islandFrameId'),0);
- await page.locator('[data-tab="calendar"]').click();assert.equal(await page.evaluate('islandFrameId'),0);
+ await page.locator('[data-tab="calendar"]').first().click();assert.equal(await page.evaluate('islandFrameId'),0);
  assert.deepEqual(errors,[]);console.log('PASS 35 landscapes pagination + reduced motion + tab animation cancellation');
  await context.close();
  }finally{await browser.close();}
