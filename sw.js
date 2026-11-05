@@ -1,7 +1,7 @@
 /* Static shell only. IndexedDB is NEVER deleted by this service worker. */
-const CACHE = 'heart-weather-shell-v0.2.0';
+const CACHE = 'heart-weather-shell-v0.3.0';
 const ASSETS = [
-  './','./index.html','./styles.css','./app.js','./manifest.webmanifest',
+  './','./index.html','./styles.css','./app.js','./letters.js','./manifest.webmanifest',
   './icons/icon-192-mood-v2.png','./icons/icon-512-mood-v2.png',
   './icons/apple-touch-icon-mood-v2.png'
 ];
