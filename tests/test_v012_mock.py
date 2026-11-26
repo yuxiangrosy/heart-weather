@@ -13,12 +13,12 @@ with sync_playwright() as w:
  page.add_script_tag(content=(p/'app.js').read_text())
  page.evaluate('() => {sha256 = async s=>window.testSha256(s)}')
  page.wait_for_selector('canvas#island-canvas')
- assert page.evaluate('MOODS.length')==16
+ assert page.evaluate('MOODS.length')==17
  page.locator('[data-tab="record"]').first.click()
  assert page.locator('.mood').count()==8
  page.screenshot(path='/mnt/data/心情天气_v0.1.2_常用天气.png',full_page=True)
  page.locator('[data-action="toggle-moods"]').click()
- assert page.locator('.mood').count()==16
+ assert page.locator('.mood').count()==17
  assert page.locator('.weather-group-title').count()==4
  page.screenshot(path='/mnt/data/心情天气_v0.1.2_全部天气.png',full_page=True)
  page.locator('[data-mood="downpour"]').click()
@@ -45,7 +45,7 @@ with sync_playwright() as w:
  assert page.locator('.record-tags').count()==1
  assert '伤心 · 1' in page.locator('.record-tags').first.inner_text()
  b=page.evaluate('makeBackup()')
- assert b['appVersion']=='0.1.2'
+ assert b['schemaVersion']==1
  assert b['data']['moodEntries'][0]['tags']==['伤心','孤独']
  prev=page.evaluate('''async()=>{const b=await makeBackup();b.appVersion='0.1.1';delete b.data.moodEntries[0].tags;const {checksum,...rest}=b;b.checksum=await sha256(JSON.stringify(rest));return await parseBackup(new File([JSON.stringify(b)],'old.moodbackup.json',{type:'application/json'}))}''')
  assert 'tags' not in prev['data']['moodEntries'][0]
@@ -58,6 +58,24 @@ with sync_playwright() as w:
  page.locator('[data-action="save-mood"]').click()
  page.wait_for_function('state.entries.length===2')
  assert page.evaluate('state.growth.length')==1
+ # Numbness can be recorded on its own and recovered without a note or tags.
+ page.locator('[data-tab="record"]').first.click()
+ page.locator('[data-action="toggle-moods"]').click()
+ page.get_by_role('button',name='无风天，麻木、没什么感觉').click()
+ page.locator('[data-action="save-mood"]').click()
+ page.wait_for_function("state.entries[0]?.moodType === 'numb'")
+ page.locator('[data-tab="calendar"]').first.click()
+ assert '无风天' in page.locator('.record-card').first.inner_text()
+ page.locator('[data-action="edit"]').first.click()
+ assert page.locator('[data-action="edit-mood"][data-mood="numb"]').get_attribute('aria-pressed')=='true'
+ page.locator('[data-action="edit-tag"][data-tag="麻木"]').click()
+ page.locator('[data-action="save-edit"]').click()
+ page.wait_for_function("state.entries[0].tags.includes('麻木')")
+ page.locator('[data-tab="review"]').first.click()
+ assert page.locator('.dist-row').filter(has_text='无风天').count()==1
+ restored=page.evaluate('''async()=>{const backup=await makeBackup();return await parseBackup(new File([JSON.stringify(backup)],'test.json'))}''')
+ numb=next(entry for entry in restored['data']['moodEntries'] if entry['moodType']=='numb')
+ assert numb['note']=='' and numb['tags']==['麻木']
  assert not errors,errors
- print('OK: 16 weather, quick8/expand, three tags, save/edit/report, old backups, invalid backups, one-growth-per-day; browser errors:', errors)
+ print('OK: 17 weather, quick8/expand, three tags, save/edit/report, old backups, invalid backups, one-growth-per-day; browser errors:', errors)
  browser.close()

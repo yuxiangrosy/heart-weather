@@ -15,6 +15,7 @@ const MOODS = [
   {id:'rainbow',icon:'🌈',name:'彩虹',hint:'惊喜、感动',grow:'彩色小花',group:'sunny'},
   {id:'moon',icon:'🌙',name:'月色',hint:'安宁、独处',grow:'月光花',group:'calm'},
   {id:'mist',icon:'🌫️',name:'迷雾',hint:'迷茫、不确定',grow:'露珠草',group:'calm'},
+  {id:'numb',icon:'🩶',name:'无风天',hint:'麻木、没什么感觉',grow:'银灰地衣',group:'calm'},
   {id:'overcast',icon:'🌥️',name:'阴天',hint:'失落、没精神',grow:'浅蓝绒草',group:'rainy'},
   {id:'downpour',icon:'🌧️',name:'大雨',hint:'伤心、难过',grow:'雨滴池塘',group:'rainy'},
   {id:'whirlwind',icon:'🌪️',name:'旋风',hint:'压力大、混乱',grow:'旋风花',group:'stormy'}
@@ -35,6 +36,7 @@ const MOOD_TAGS = {
   rainbow:['惊喜','感动','被治愈','幸运','感谢','释然'],
   moon:['安宁','平静','独处','想念','释然','安心','温柔'],
   mist:['迷茫','纠结','困惑','不确定','犹豫','无措'],
+  numb:['麻木','空白','没什么感觉','反应迟钝','像隔着一层'],
   overcast:['失落','没精神','提不起劲','无聊','沮丧','空落落'],
   downpour:['伤心','想哭','心疼','孤独','悲伤','委屈','难以释怀'],
   whirlwind:['压力大','混乱','不知所措','着急','崩溃边缘','事情太多']
@@ -160,7 +162,7 @@ function moodGrid(selected,isEditing=false){const expanded=isEditing?state.editS
   const special= !expanded&&selected&&!QUICK_MOODS.has(selected)?MOOD_MAP[selected]:null;
   const selectedReminder=special?`<div class="mood-selected-summary"><span>✓ 你选了：${special.icon} ${special.name} · ${special.hint}</span><button type="button" data-action="${isEditing?'edit-toggle-moods':'toggle-moods'}">换一种</button></div>`:'';
   const item=m=>`<button class="mood ${selected===m.id?'selected':''}" data-action="${isEditing?'edit-mood':'mood'}" data-mood="${m.id}" aria-pressed="${selected===m.id}" aria-label="${m.name}，${m.hint}"><span class="emoji">${m.icon}</span><b>${m.name}</b><small>${m.hint}</small></button>`;
-  if(!expanded)return `${selectedReminder}<div class="mood-grid">${visible.map(item).join('')}</div><button type="button" class="mood-toggle" data-action="${isEditing?'edit-toggle-moods':'toggle-moods'}">✨ 更多心情天气（共 16 种）⌄</button>`;
+  if(!expanded)return `${selectedReminder}<div class="mood-grid">${visible.map(item).join('')}</div><button type="button" class="mood-toggle" data-action="${isEditing?'edit-toggle-moods':'toggle-moods'}">✨ 更多心情天气（共 ${MOODS.length} 种）⌄</button>`;
   return `<div class="mood-expanded">${Object.entries(MOOD_GROUPS).map(([key,g])=>`<div class="weather-group-title">${g.icon} ${g.name}</div><div class="mood-grid">${MOODS.filter(m=>m.group===key).map(item).join('')}</div>`).join('')}</div><button type="button" class="mood-toggle" data-action="${isEditing?'edit-toggle-moods':'toggle-moods'}">收起天气 ⌃</button>`;}
 function tagSelector(mood,chosen,isEditing=false){
   if(!mood)return '<p class="tag-empty">选择天气后，还能给这一刻加几个更细腻的情绪标签（选填）。</p>';
@@ -227,13 +229,14 @@ function drawIsland(canvas,now=0){
   if(latest==='dawn')sky='#f6d9dc';
   if(latest==='warm')sky='#f8e9c9';
   if(latest==='overcast')sky='#d2dbe5';
+  if(latest==='numb')sky='#d4d7da';
   if(latest==='sleepy')sky='#dae6e5';
   ctx.clearRect(0,0,W,H);ctx.fillStyle=sky;ctx.fillRect(0,0,W,H);
   const r=(x,y,w,h,c)=>{ctx.fillStyle=c;ctx.fillRect(Math.round(x),Math.round(y),w,h);};
   const poly=(points,c)=>{ctx.fillStyle=c;ctx.beginPath();points.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();ctx.fill();};
   const cloud=(x,y)=>{r(x,y+6,31,7,'#fffdf8');r(x+5,y+1,11,12,'#fffdf8');r(x+17,y+3,10,10,'#fffdf8');r(x+3,y+13,25,2,'#d0dcf2');};
   for(let i=0;i<14;i++){r((i*43+17)%W,(i*27+9)%75,2,2,'#ffffff88');}
-  const drift=still?0:Math.round(Math.sin(t*0.30)*4);
+  const drift=still||latest==='numb'?0:Math.round(Math.sin(t*0.30)*4);
   cloud(14+drift,19);cloud(139-drift,31);
   if(['sun','partly','rainbow','warm','dawn'].includes(latest)){
     const pulse=still?0:Math.round(Math.sin(t*1.1)*1.5);
@@ -320,6 +323,11 @@ function drawPlant(c,x,y,type){const r=(a,b,w,h,col)=>{c.fillStyle=col;c.fillRec
   else if(type==='warm'){r(x-3,y-14,3,14,'#6b975e');r(x-8,y-20,16,11,'#f3c46b');r(x-4,y-22,8,11,'#f8d785');r(x+6,y-8,6,5,'#f4b861');}
   else if(type==='sleepy'){r(x-7,y-4,14,5,'#8db98d');r(x-4,y-8,8,5,'#a1c2a1');r(x-2,y-10,5,4,'#bedab3');}
   else if(type==='mist'){r(x-8,y-5,15,5,'#a4c0bc');r(x-5,y-12,11,5,'#adc8c3');r(x-1,y-16,4,5,'#dcf3eb');}
+  else if(type==='numb'){
+    r(x-7,y-2,14,4,'#899a94');
+    r(x-5,y-4,7,3,'#b4beb8');
+    r(x+2,y-3,6,3,'#cbd1c7');
+  }
   else if(type==='overcast'){r(x-7,y-3,15,5,'#a5b7c9');r(x-4,y-11,9,10,'#9cadd4');r(x-2,y-15,5,5,'#c5d0f0');}
   else if(type==='downpour'){r(x-7,y-4,15,7,'#93bada');r(x-5,y-7,11,4,'#c1e0ed');r(x-2,y-10,5,4,'#e4f5fa');r(x-1,y-16,3,6,'#79b0cd');}
   else if(type==='wind'){r(x,y-13,2,14,'#668d68');r(x-7,y-18,15,7,'#c8d9a3');r(x-9,y-16,4,7,'#d8e7b0');r(x+7,y-20,5,5,'#a5bf92');}
